@@ -1,11 +1,12 @@
 # Copyright (c) Facebook, Inc. and its affiliates.
-# 
+#
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
 """ Utility functions for processing point clouds.
 
 Author: Charles R. Qi and Or Litany
+        modified by Chunghyun Park
 """
 
 import os
@@ -25,6 +26,7 @@ except:
 
 # Mesh IO
 import trimesh
+import open3d as o3d # only for bounding box IO
 
 import matplotlib.pyplot as pyplot
 
@@ -80,7 +82,7 @@ def volume_to_point_cloud(vol):
         return Nx3 numpy array.
     """
     vsize = vol.shape[0]
-    assert(vol.shape[1] == vsize and vol.shape[1] == vsize)
+    assert(vol.shape[1] == vsize and vol.shape[2] == vsize)
     points = []
     for a in range(vsize):
         for b in range(vsize):
@@ -138,7 +140,7 @@ def point_cloud_to_volume_v2(points, vsize, radius=1.0, num_sample=128):
                     # Normalize
                     pc_center = (np.array([i,j,k])+0.5)*voxel - radius
                     pc = (pc - pc_center) / voxel # shift and scale
-                    vol[i,j,k,:,:] = pc 
+                    vol[i,j,k,:,:] = pc
     return vol
 
 def point_cloud_to_image_batch(point_clouds, imgsize, radius=1.0, num_sample=128):
@@ -195,6 +197,7 @@ def read_ply(filename):
     plydata = PlyData.read(filename)
     pc = plydata['vertex'].data
     pc_array = np.array([[x, y, z] for x,y,z in pc])
+    plydata = o3d.io.read_point_cloud
     return pc_array
 
 
@@ -213,19 +216,19 @@ def write_ply_color(points, labels, filename, num_classes=None, colormap=pyplot.
         num_classes = np.max(labels)+1
     else:
         assert(num_classes>np.max(labels))
-    
+
     vertex = []
-    #colors = [pyplot.cm.jet(i/float(num_classes)) for i in range(num_classes)]    
-    colors = [colormap(i/float(num_classes)) for i in range(num_classes)]    
+    #colors = [pyplot.cm.jet(i/float(num_classes)) for i in range(num_classes)]
+    colors = [colormap(i/float(num_classes)) for i in range(num_classes)]
     for i in range(N):
         c = colors[labels[i]]
         c = [int(x*255) for x in c]
         vertex.append( (points[i,0],points[i,1],points[i,2],c[0],c[1],c[2]) )
     vertex = np.array(vertex, dtype=[('x', 'f4'), ('y', 'f4'),('z', 'f4'),('red', 'u1'), ('green', 'u1'),('blue', 'u1')])
-    
+
     el = PlyElement.describe(vertex, 'vertex', comments=['vertices'])
     PlyData([el], text=True).write(filename)
-   
+
 def write_ply_rgb(points, colors, out_filename, num_classes=None):
     """ Color (N,3) points with RGB colors (N,3) within range [0,255] as OBJ file """
     colors = colors.astype(int)
@@ -266,7 +269,7 @@ def rotate_point_cloud(points, rotation_matrix=None):
     # Rotate in-place around Z axis.
     if rotation_matrix is None:
         rotation_angle = np.random.uniform() * 2 * np.pi
-        sinval, cosval = np.sin(rotation_angle), np.cos(rotation_angle)     
+        sinval, cosval = np.sin(rotation_angle), np.cos(rotation_angle)
         rotation_matrix = np.array([[cosval, sinval, 0],
                                     [-sinval, cosval, 0],
                                     [0, 0, 1]])
@@ -324,13 +327,13 @@ def bbox_corner_dist_measure(crnr1, crnr2):
     """ compute distance between box corners to replace iou
     Args:
         crnr1, crnr2: Nx3 points of box corners in camera axis (y points down)
-        output is a scalar between 0 and 1        
+        output is a scalar between 0 and 1
     """
-    
+
     dist = sys.maxsize
     for y in range(4):
         rows = ([(x+y)%4 for x in range(4)] + [4+(x+y)%4 for x in range(4)])
-        d_ = np.linalg.norm(crnr2[rows, :] - crnr1, axis=1).sum() / 8.0            
+        d_ = np.linalg.norm(crnr2[rows, :] - crnr1, axis=1).sum() / 8.0
         if d_ < dist:
             dist = d_
 
@@ -338,8 +341,8 @@ def bbox_corner_dist_measure(crnr1, crnr2):
 
     measure = max(1.0 - dist/u, 0)
     print(measure)
-    
-    
+
+
     return measure
 
 
@@ -347,7 +350,7 @@ def point_cloud_to_bbox(points):
     """ Extract the axis aligned box from a pcl or batch of pcls
     Args:
         points: Nx3 points or BxNx3
-        output is 6 dim: xyz pos of center and 3 lengths        
+        output is 6 dim: xyz pos of center and 3 lengths
     """
     which_dim = len(points.shape) - 2 # first dim if a single cloud and second if batch
     mn, mx = points.min(which_dim), points.max(which_dim)
@@ -372,18 +375,51 @@ def write_bbox(scene_bbox, out_filename):
         lengths = box[3:]
         trns = np.eye(4)
         trns[0:3, 3] = ctr
-        trns[3,3] = 1.0            
+        trns[3,3] = 1.0
         box_trimesh_fmt = trimesh.creation.box(lengths, trns)
         return box_trimesh_fmt
 
+    def get_vertices(box):
+        ctr = box[:3]
+        lengths = box[3:]
+        trns = np.eye(4)
+        trns[0:3, 3] = ctr
+        trns[3, 3] = 1.0
+
+        local_vertices = []
+        for i in [0, 1]:
+            for j in [0, 1]:
+                for k in [0, 1]:
+                    temp = np.array([(i - 0.5) * lengths[0], (j - 0.5) * lengths[1], (k - 0.5) * lengths[2], 1.0])
+                    local_vertices.append(temp)
+
+        global_vertices = [list(np.matmul(trns, vertice)[:3]) for vertice in local_vertices]
+
+        return global_vertices
+
+    linesetname = os.path.splitext(out_filename)[0] + "_lineset.ply" # out_filename should have only one dot
     scene = trimesh.scene.Scene()
-    for box in scene_bbox:
-        scene.add_geometry(convert_box_to_trimesh_fmt(box))        
-    
+    lineset = o3d.geometry.LineSet()
+    lineset_points = []
+    lineset_lines = []
+    lines = [[0, 1], [0, 2], [1, 3], [2, 3], [4, 5], [4, 6], [5, 7], [6, 7], [0, 4], [1, 5], [2, 6], [3, 7]]
+
+    for box_idx, box in enumerate(scene_bbox):
+        scene.add_geometry(convert_box_to_trimesh_fmt(box))
+        lineset_points.extend(get_vertices(box))
+        temp_lines = [list(map(lambda x:x + 8 * box_idx, line)) for line in lines]
+        lineset_lines.extend(temp_lines)
+
+    lineset_colors = [[1, 0, 0]] * len(lineset_lines) # only red lines
+    lineset.points = o3d.utility.Vector3dVector(lineset_points)
+    lineset.lines = o3d.utility.Vector2iVector(lineset_lines)
+    lineset.colors = o3d.utility.Vector3dVector(lineset_colors)
+
     mesh_list = trimesh.util.concatenate(scene.dump())
-    # save to ply file    
+    # save to ply file and lineset
     trimesh.io.export.export_mesh(mesh_list, out_filename, file_type='ply')
-    
+    o3d.io.write_line_set(linesetname, lineset)
+
     return
 
 def write_oriented_bbox(scene_bbox, out_filename):
@@ -409,19 +445,54 @@ def write_oriented_bbox(scene_bbox, out_filename):
         lengths = box[3:6]
         trns = np.eye(4)
         trns[0:3, 3] = ctr
-        trns[3,3] = 1.0            
+        trns[3,3] = 1.0
         trns[0:3,0:3] = heading2rotmat(box[6])
         box_trimesh_fmt = trimesh.creation.box(lengths, trns)
         return box_trimesh_fmt
 
+    def get_vertices(box):
+        ctr = box[:3]
+        lengths = box[3:6]
+        trns = np.eye(4)
+        trns[0:3, 3] = ctr
+        trns[3, 3] = 1.0
+        trns[0:3, 0:3] = heading2rotmat(box[6])
+
+        local_vertices = []
+        for i in [0, 1]:
+            for j in [0, 1]:
+                for k in [0, 1]:
+                    temp = np.array([(i - 0.5) * lengths[0], (j - 0.5) * lengths[1], (k - 0.5) * lengths[2], 1.0])
+                    local_vertices.append(temp)
+
+        global_vertices = [list(np.matmul(trns, vertice)[:3]) for vertice in local_vertices]
+
+        return global_vertices
+
+    linesetname = os.path.splitext(out_filename)[0] + "_lineset.ply" # out_filename should have only one dot
     scene = trimesh.scene.Scene()
-    for box in scene_bbox:
-        scene.add_geometry(convert_oriented_box_to_trimesh_fmt(box))        
-    
+    lineset = o3d.geometry.LineSet()
+    lineset_points = []
+    lineset_lines = []
+    lines = [[0, 1], [0, 2], [1, 3], [2, 3], [4, 5], [4, 6], [5, 7], [6, 7], [0, 4], [1, 5], [2, 6], [3, 7]]
+
+    scene = trimesh.scene.Scene()
+    for box_idx, box in enumerate(scene_bbox):
+        scene.add_geometry(convert_oriented_box_to_trimesh_fmt(box))
+        lineset_points.extend(get_vertices(box))
+        temp_lines = [list(map(lambda x:x + 8 * box_idx, line)) for line in lines]
+        lineset_lines.extend(temp_lines)
+
+    lineset_colors = [[1, 0, 0]] * len(lineset_lines) # only red lines
+    lineset.points = o3d.utility.Vector3dVector(lineset_points)
+    lineset.lines = o3d.utility.Vector2iVector(lineset_lines)
+    lineset.colors = o3d.utility.Vector3dVector(lineset_colors)
+
     mesh_list = trimesh.util.concatenate(scene.dump())
-    # save to ply file    
+    # save to ply file
     trimesh.io.export.export_mesh(mesh_list, out_filename, file_type='ply')
-    
+    o3d.io.write_line_set(linesetname, lineset)
+
     return
 
 def write_oriented_bbox_camera_coord(scene_bbox, out_filename):
@@ -448,25 +519,25 @@ def write_oriented_bbox_camera_coord(scene_bbox, out_filename):
         lengths = box[3:6]
         trns = np.eye(4)
         trns[0:3, 3] = ctr
-        trns[3,3] = 1.0            
+        trns[3,3] = 1.0
         trns[0:3,0:3] = heading2rotmat(box[6])
         box_trimesh_fmt = trimesh.creation.box(lengths, trns)
         return box_trimesh_fmt
 
     scene = trimesh.scene.Scene()
     for box in scene_bbox:
-        scene.add_geometry(convert_oriented_box_to_trimesh_fmt(box))        
-    
+        scene.add_geometry(convert_oriented_box_to_trimesh_fmt(box))
+
     mesh_list = trimesh.util.concatenate(scene.dump())
-    # save to ply file    
+    # save to ply file
     trimesh.io.export.export_mesh(mesh_list, out_filename, file_type='ply')
-    
+
     return
 
 def write_lines_as_cylinders(pcl, filename, rad=0.005, res=64):
     """Create lines represented as cylinders connecting pairs of 3D points
     Args:
-        pcl: (N x 2 x 3 numpy array): N pairs of xyz pos             
+        pcl: (N x 2 x 3 numpy array): N pairs of xyz pos
         filename: (string) filename for the output mesh (ply) file
         rad: radius for the cylinder
         res: number of sections used to create the cylinder
@@ -488,30 +559,30 @@ def write_lines_as_cylinders(pcl, filename, rad=0.005, res=64):
 # ----------------------------------------
 if __name__ == '__main__':
     print('running some tests')
-    
+
     ############
     ## Test "write_lines_as_cylinders"
     ############
     pcl = np.random.rand(32, 2, 3)
     write_lines_as_cylinders(pcl, 'point_connectors')
     input()
-    
-   
+
+
     scene_bbox = np.zeros((1,7))
     scene_bbox[0,3:6] = np.array([1,2,3]) # dx,dy,dz
-    scene_bbox[0,6] = np.pi/4 # 45 degrees 
+    scene_bbox[0,6] = np.pi/4 # 45 degrees
     write_oriented_bbox(scene_bbox, 'single_obb_45degree.ply')
     ############
-    ## Test point_cloud_to_bbox 
+    ## Test point_cloud_to_bbox
     ############
     pcl = np.random.rand(32, 16, 3)
     pcl_bbox = point_cloud_to_bbox(pcl)
     assert pcl_bbox.shape == (32, 6)
-    
+
     pcl = np.random.rand(16, 3)
-    pcl_bbox = point_cloud_to_bbox(pcl)    
+    pcl_bbox = point_cloud_to_bbox(pcl)
     assert pcl_bbox.shape == (6,)
-    
+
     ############
     ## Test corner distance
     ############
@@ -526,9 +597,9 @@ if __name__ == '__main__':
     crnr2 = crnr1
 
     print(bbox_corner_dist_measure(crnr1, crnr2))
-    
-    
-    
+
+
+
     print('tests PASSED')
-    
-    
+
+
